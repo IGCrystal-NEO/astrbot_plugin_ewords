@@ -32,6 +32,11 @@ class WordPlugin(Star):
         self.timer_task = None
         self.logger = logger
 
+        # 从 config 中读取配置（如果有配置传入），否则使用默认值
+        default_word_count = config.get("default_word_count", 10) if config else 10
+        enable_timer = config.get("enable_timer", False) if config else False
+        reminder_interval = config.get("reminder_interval", 60) if config else 60
+
         # 默认英文到中文映射（若词库能提供，则会自动更新）
         self.EN_TO_CN = {
             "apple": "苹果",
@@ -358,7 +363,7 @@ class WordPlugin(Star):
         except Exception as e:
             yield event.plain_result(f"切换词库失败: {e}")
 
-    @ewords.command("清空")
+    @ewords.command("清空", alias={'清空历史'})
     async def clear_history(self, event: AstrMessageEvent):
         self.logger.info("接收到清空记忆指令")
         self.used_words = set()
@@ -394,7 +399,7 @@ class WordPlugin(Star):
         self.logger.info(f"定时提醒设置为 {time_str}")
         yield event.plain_result(f"定时提醒已设置为 {time_str}，请注意查收消息喵～")
 
-    @ewords.command("help")
+    @ewords.command("help", alias={'帮助'})
     async def show_help(self, event: AstrMessageEvent):
         self.logger.info("接收到帮助指令")
         help_text = (
