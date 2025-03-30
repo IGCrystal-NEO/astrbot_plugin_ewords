@@ -1,0 +1,26 @@
+{
+  "default_word_count": {
+    "description": "默认记单词数量",
+    "type": "int",
+    "default": 10,
+    "hint": "当用户未指定记单词数量时，将使用此默认值。"
+  },
+  "enable_timer": {
+    "description": "是否启用定时提醒",
+    "type": "bool",
+    "default": false,
+    "hint": "启用后，插件会根据设置的时间间隔发送定时提醒消息。"
+  },
+  "reminder_interval": {
+    "description": "定时提醒间隔（分钟）",
+    "type": "int",
+    "default": 60,
+    "hint": "定时提醒的时间间隔，单位为分钟。"
+  },
+  "vocab_file": {
+    "description": "默认词库文件名",
+    "type": "string",
+    "default": "CET4.json",
+    "hint": "插件默认使用的词库文件名，存放于插件目录下的 words 文件夹中。"
+  }
+}
