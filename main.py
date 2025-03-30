@@ -1,232 +1,415 @@
-# main.py
 import re
+import json
 import random
 import datetime
 import asyncio
-import threading
+import logging
+import os
+from typing import List, Dict, Any
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 
-# 全局变量：词库、已使用单词集合、组单词记录
-VOCABULARIES = {
-    "default": ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape",
-                "honeydew", "kiwi", "lemon", "mango", "nectarine", "orange", "papaya"]
-}
-# 英文单词对应中文释义，用于复习检测（示例数据）
-EN_TO_CN = {
-    "apple": "苹果", "banana": "香蕉", "cherry": "樱桃", "date": "枣",
-    "elderberry": "接骨木莓", "fig": "无花果", "grape": "葡萄",
-    "honeydew": "哈密瓜", "kiwi": "猕猴桃", "lemon": "柠檬",
-    "mango": "芒果", "nectarine": "油桃", "orange": "橙子", "papaya": "木瓜"
-}
-used_words = set()  # 已经发送过的单词集合
-word_groups = {}    # 按日期记录的单词组，格式：{"YYYY-MM-DD": [word, ...]}
+# 配置日志
+logger = logging.getLogger("WordPlugin")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
-# 定时提醒相关变量
-timer_interval = None
-timer_task = None
+# 内置默认CET4词库（示例，可根据需要扩展）
+DEFAULT_CET4_VOCAB = [
+    "abandon", "ability", "able", "about", "above", "abroad", "absence", "absolute",
+    "absorb", "abstract", "abuse", "academic", "accent", "acceptable", "access", "accident"
+]
 
-def reset_used_words(vocab_list):
-    # 重置used_words集合，确保词库足够
-    global used_words
-    used_words = set(vocab_list)
-
-def get_unique_words(count, library_name="default"):
-    global used_words
-    vocab = VOCABULARIES.get(library_name, [])
-    available = list(set(vocab) - used_words)
-    if len(available) < count:
-        # 如果唯一单词不足，重置已使用记录
-        reset_used_words(vocab)
-        available = list(set(vocab))
-    selected = random.sample(available, count)
-    used_words.update(selected)
-    return selected
-
-def save_word_group(words):
-    today = datetime.date.today().isoformat()
-    if today in word_groups:
-        word_groups[today].extend(words)
-    else:
-        word_groups[today] = words
-
-def parse_time_interval(time_str):
-    # 支持预设：一天, 1小时, 30分钟, 10分钟，或自定义数字（单位：分钟）
-    if "一天" in time_str:
-        return 24 * 60 * 60
-    if "小时" in time_str:
-        num = int(''.join(filter(str.isdigit, time_str)) or 1)
-        return num * 60 * 60
-    if "分钟" in time_str:
-        num = int(''.join(filter(str.isdigit, time_str)) or 10)
-        return num * 60
-    try:
-        minutes = int(time_str)
-        return minutes * 60
-    except:
-        return 10 * 60
-
-async def start_timer(context: Context, unified_msg_origin: str):
-    global timer_interval, timer_task
-    while timer_interval:
-        await asyncio.sleep(timer_interval)
-        # 发送记单词提醒给用户
-        await context.send_message(unified_msg_origin, [{"type": "plain", "data": {"text": "【提醒】该记单词啦！"}}])
-
-@register("word_plugin", "YourName", "记单词及复习插件", "1.0.0", "https://github.com/your_repo")
+@register("word_plugin", "IGCrystal", "记单词及复习插件", "1.1.1", "https://github.com/IGCrystal/AstrBot_plugin_Ewords")
 class WordPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
-        # 如果需要持久化，可以在 data 目录存储 used_words 和 word_groups
         self.context = context
-        self.timer_future = None
+        self.timer_task = None
+        self.logger = logger
 
-    @filter.command("记单词")
+        # 默认英文到中文映射（若词库能提供，则会自动更新）
+        self.EN_TO_CN = {
+            "apple": "苹果",
+            "banana": "香蕉",
+            "cherry": "樱桃",
+            "date": "枣",
+            "elderberry": "接骨木莓",
+            "fig": "无花果",
+            "grape": "葡萄",
+            "honeydew": "哈密瓜",
+            "kiwi": "猕猴桃",
+            "lemon": "柠檬",
+            "mango": "芒果",
+            "nectarine": "油桃",
+            "orange": "橙子",
+            "papaya": "木瓜"
+        }
+
+        # 数据文件均放在插件目录下
+        base_dir = os.path.dirname(__file__)
+        self.vocab_dir = os.path.join(base_dir, "words")
+        self.default_vocab_filename = "CET4.json"  # 默认词库文件名
+        self.vocab_file = os.path.join(self.vocab_dir, self.default_vocab_filename)
+        self.used_file = os.path.join(base_dir, "used.json")
+
+        # 加载词库和使用记录
+        self.vocabularies = self.load_vocab()
+        self.used_words = set()
+        self.word_groups = {}  # 格式：{ "group_id": [words] }
+        self.load_used_data()
+
+        # 存储最后一次复习数据
+        self.last_review_words: List[str] = []
+        self.last_review_mode: str = ""  # 仅支持 "1" 或 "2"
+
+        # 标识是否切换过词库，默认未切换，使用默认词库
+        self.vocab_switched = False
+
+    # 辅助函数：将列表转换为每项前带序号的字符串
+    def format_list_with_numbers(self, items: List[str]) -> str:
+        return "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
+
+    # 加载词库：若文件不存在或格式不正确，则使用默认CET4词库
+    def load_vocab(self) -> Dict[str, List[str]]:
+        if not os.path.exists(self.vocab_file):
+            self.logger.info(f"词库文件 {self.vocab_file} 不存在，使用默认CET4词库")
+            return {"default": DEFAULT_CET4_VOCAB}
+        try:
+            with open(self.vocab_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                words = []
+                mapping = {}
+                for entry in data:
+                    if isinstance(entry, dict) and "word" in entry:
+                        word = entry["word"]
+                        words.append(word)
+                        if "translations" in entry and isinstance(entry["translations"], list) and entry["translations"]:
+                            mapping[word] = entry["translations"][0].get("translation", "未知")
+                if mapping:
+                    self.EN_TO_CN = mapping
+                self.logger.info(f"成功加载词库（列表格式），共 {len(words)} 个单词")
+                return {"default": words}
+            elif isinstance(data, dict):
+                self.logger.info("成功加载词库（字典格式）")
+                return data
+            else:
+                self.logger.error("词库文件格式不正确，使用默认CET4词库")
+                return {"default": DEFAULT_CET4_VOCAB}
+        except Exception as e:
+            self.logger.error(f"加载词库失败：{e}，使用默认CET4词库")
+            return {"default": DEFAULT_CET4_VOCAB}
+
+    def load_used_data(self):
+        try:
+            with open(self.used_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.used_words = set(data.get("used_words", []))
+                self.word_groups = data.get("word_groups", {})
+                self.logger.info("成功加载使用记录")
+        except Exception as e:
+            self.logger.error(f"加载使用记录失败：{e}")
+            self.used_words = set()
+            self.word_groups = {}
+
+    def save_used_data(self):
+        data = {
+            "used_words": list(self.used_words),
+            "word_groups": self.word_groups
+        }
+        try:
+            with open(self.used_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.logger.info("使用记录已保存")
+        except Exception as e:
+            self.logger.error(f"保存使用记录失败：{e}")
+
+    def reset_used_words(self, vocab_list: List[str]):
+        self.used_words = set(vocab_list)
+        self.save_used_data()
+        self.logger.info("已重置使用记录")
+
+    def get_unique_words(self, count: int, library_name: str = "default") -> List[str]:
+        vocab = self.vocabularies.get(library_name, [])
+        if count > len(vocab):
+            self.logger.info(f"请求单词数 {count} 超过词库总数 {len(vocab)}，自动调整为 {len(vocab)}")
+            count = len(vocab)
+        available = list(set(vocab) - self.used_words)
+        if len(available) < count:
+            self.logger.info("可用单词不足，重置使用记录")
+            self.reset_used_words(vocab)
+            available = list(set(vocab))
+        count = min(count, len(available))
+        selected = random.sample(available, count)
+        self.used_words.update(selected)
+        self.save_used_data()
+        self.logger.info(f"获取 {count} 个不重复的单词")
+        return selected
+
+    def save_word_group(self, words: List[str]):
+        group_id = datetime.date.today().isoformat()
+        if group_id in self.word_groups:
+            # 合并时去重并保持顺序
+            combined = list(dict.fromkeys(self.word_groups[group_id] + words))
+            self.word_groups[group_id] = combined
+        else:
+            self.word_groups[group_id] = words
+        self.save_used_data()
+        self.logger.info(f"保存单词组：{group_id}")
+
+    def get_latest_group(self) -> List[str]:
+        if not self.word_groups:
+            return []
+        latest_group = sorted(self.word_groups.keys())[-1]
+        return self.word_groups.get(latest_group, [])
+
+    def parse_time_interval(self, time_str: str) -> int:
+        self.logger.info(f"解析时间参数：{time_str}")
+        if "一天" in time_str:
+            return 24 * 60 * 60
+        if "小时" in time_str:
+            num = int(''.join(re.findall(r'\d+', time_str)) or 1)
+            return num * 60 * 60
+        if "分钟" in time_str:
+            num = int(''.join(re.findall(r'\d+', time_str)) or 10)
+            return num * 60
+        try:
+            minutes = int(time_str)
+            return minutes * 60
+        except:
+            return 10 * 60
+
+    async def start_timer(self, unified_msg_origin: str, interval: int):
+        self.logger.info(f"开始持续定时提醒，每 {interval} 秒提醒一次")
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                message_chain = MessageChain().message("【提醒】该记单词啦！")
+                await self.context.send_message(unified_msg_origin, message_chain)
+                self.logger.info("发送定时提醒")
+            except Exception as e:
+                self.logger.error(f"发送定时提醒失败：{e}")
+
+    @filter.command_group("ewords")
+    def ewords(self):
+        """记单词插件指令组"""
+        pass
+
+    @ewords.command("记单词")
     async def add_words(self, event: AstrMessageEvent):
-        """
-        记单词指令：
-        格式：记单词+{数字}
-        若数字小于10则默认为10。
-        """
-        # 匹配命令格式
-        pattern = r"记单词\+(\d+)"
-        match = re.match(pattern, event.message_str)
-        count = int(match.group(1)) if match else 10
+        self.logger.info("接收到记单词指令")
+        pattern = r"记单词\s*(\d+)"
+        match = re.search(pattern, event.message_str)
+        count = int(match.group(1)) if match and match.group(1) else 10
         if count < 10:
             count = 10
-        # 获取不重复的单词
-        words = get_unique_words(count)
-        save_word_group(words)
-        reply = f"抽取的单词（共{len(words)}个）：\n" + ", ".join(words)
+        # 如果用户没有切换词库，则提示使用默认词库
+        prompt = ""
+        if not self.vocab_switched:
+            prompt = "没有指定词库喵，已使用默认词库喵~ 默认为CET4喵~\n"
+        words = self.get_unique_words(count)
+        self.save_word_group(words)
+        reply = prompt + f"抽取的单词（共{len(words)}个）：\n" + self.format_list_with_numbers(words)
+        self.logger.info("记单词指令执行完毕")
         yield event.plain_result(reply)
 
-    @filter.command("复习")
+    @ewords.command("复习")
     async def review_words(self, event: AstrMessageEvent):
-        """
-        复习指令：
-        进入复习交互流程，首先选择复习模式：
-         1. 按组复习（输入组日期，格式YYYY-MM-DD）
-         2. 随机复习（从历史单词中随机抽取10个）
-        然后选择复习方式：
-         1. 根据英文拼写判断中文意思
-         2. 根据中文意思写出完整单词
-         3. 提示生成句子（**包裹的单词）
-        """
-        # 第一步：选择复习模式
-        prompt_mode = ("请选择复习模式：\n"
-                       "1. 按组复习（输入指定组的日期，格式YYYY-MM-DD）\n"
-                       "2. 随机复习（直接输入数字 2）")
-        yield event.plain_result(prompt_mode)
-        # 等待用户回复（这里简单模拟，实际请使用会话控制）
-        mode_resp = await self.context.wait_for_message(event.unified_msg_origin, timeout=30)
-        mode = mode_resp.strip()
-        if mode == "1":
-            yield event.plain_result("请输入组的日期（YYYY-MM-DD）：")
-            date_resp = await self.context.wait_for_message(event.unified_msg_origin, timeout=30)
-            group_date = date_resp.strip()
-            words = word_groups.get(group_date, [])
-            if not words:
-                yield event.plain_result(f"未找到日期为 {group_date} 的单词组。")
+        self.logger.info("接收到复习指令")
+        self.load_used_data()  # 重新加载最新记录
+        tokens = event.message_str.strip().split()
+        if len(tokens) < 4:
+            self.logger.error("复习指令参数不完整")
+            yield event.plain_result("请完整输入复习指令，例如：/ewords 复习 1 1")
+            return
+        mode = tokens[2]  # 复习方式：1（英文→中文），2（中文→英文）
+        if mode not in ["1", "2"]:
+            self.logger.error(f"复习方式参数错误：{mode}")
+            yield event.plain_result("复习方式不正确，请输入 1 或 2 喵～")
+            return
+        rtype = tokens[3]  # 复习类型：1 按组复习，2 随机复习
+        self.last_review_mode = mode
+        words = []
+        if rtype == "1":
+            group = self.get_latest_group()
+            if not group:
+                self.logger.error("无按组记录")
+                yield event.plain_result("没有按组记录，请先使用记单词指令记录单词喵～")
                 return
-        elif mode == "2":
-            # 随机抽取10个历史单词
-            all_used = list(used_words)
-            if len(all_used) < 10:
-                words = all_used
-            else:
-                words = random.sample(all_used, 10)
+            words = group
+            words = list(dict.fromkeys(words))
+        elif rtype == "2":
+            all_used = list(self.used_words)
+            words = random.sample(all_used, min(10, len(all_used)))
         else:
-            yield event.plain_result("无效的复习模式。")
+            self.logger.error(f"复习类型参数错误：{rtype}")
+            yield event.plain_result("复习类型不正确，请输入 1 或 2 喵～")
             return
 
-        # 第二步：选择复习方式
-        prompt_method = ("请选择复习方式：\n"
-                         "1. 根据英文拼写判断中文意思\n"
-                         "2. 根据中文意思写出完整单词\n"
-                         "3. 提示生成句子判断**包裹单词的中文意思")
-        yield event.plain_result(prompt_method)
-        method_resp = await self.context.wait_for_message(event.unified_msg_origin, timeout=30)
-        method = method_resp.strip()
-        # 开始复习每个单词
-        for word in words:
-            if method == "1":
-                # 方式1：根据英文单词提示，让用户输入中文意思
-                answer_prompt = f"请回答：单词 **{word}** 的中文意思是？"
-                yield event.plain_result(answer_prompt)
-                user_answer = await self.context.wait_for_message(event.unified_msg_origin, timeout=30)
-                correct = EN_TO_CN.get(word, "未知")
-                if re.fullmatch(correct, user_answer.strip()):
-                    yield event.plain_result("回答正确！")
+        if not words:
+            self.logger.error("无可复习单词")
+            yield event.plain_result("没有可复习的单词喵～")
+            return
+
+        self.last_review_words = words
+        if mode == "1":
+            content = "复习开始！请翻译下面的单词：\n" + self.format_list_with_numbers(words)
+        elif mode == "2":
+            prompts = [self.EN_TO_CN.get(w, "未知") for w in words]
+            content = "复习开始！请写出下列中文对应的英文单词：\n" + self.format_list_with_numbers(prompts)
+        self.logger.info("复习内容已发送")
+        yield event.plain_result(content)
+        yield event.plain_result("请使用 /ewords 验证 指令，后跟空格分隔的答案，检查你的复习结果喵～")
+
+    @ewords.command("验证", alias={'核对', '校对', '答案'})
+    async def verify(self, event: AstrMessageEvent):
+        self.logger.info("接收到验证指令")
+        tokens = event.message_str.strip().split()
+        if len(tokens) < 3:
+            self.logger.error("验证指令参数不完整")
+            yield event.plain_result("请在验证指令中输入你的答案，例如：/ewords 验证 苹果 香蕉 ...")
+            return
+        user_answers = tokens[2:]
+        if not self.last_review_words:
+            self.logger.error("没有复习记录")
+            yield event.plain_result("没有找到上一次的复习记录，请先进行复习喵～")
+            return
+        expected = []
+        if self.last_review_mode == "1":
+            for w in self.last_review_words:
+                expected.append(self.EN_TO_CN.get(w, "未知"))
+        elif self.last_review_mode == "2":
+            expected = self.last_review_words
+        else:
+            self.logger.error("复习方式记录错误")
+            yield event.plain_result("复习方式记录错误喵～")
+            return
+
+        if len(user_answers) != len(expected):
+            self.logger.error("答案数量不匹配")
+            yield event.plain_result(f"答案数量不匹配，应该有 {len(expected)} 个答案喵～")
+            return
+
+        correct = sum(1 for ua, exp in zip(user_answers, expected) if ua.strip().lower() == exp.lower())
+        feedback = [f"{i+1}. {'正确' if ua.strip().lower() == exp.lower() else f'错误（正确答案：{exp}）'}"
+                    for i, (ua, exp) in enumerate(zip(user_answers, expected))]
+        reply = f"验证结果：{correct}/{len(expected)} 正确\n" + "\n".join(feedback)
+        self.logger.info("验证完成")
+        yield event.plain_result(reply)
+
+    @ewords.command("切换", alias={'切换词库'})
+    async def switch_vocab(self, event: AstrMessageEvent):
+        self.logger.info("接收到切换词库指令")
+        if not os.path.exists(self.vocab_dir):
+            os.makedirs(self.vocab_dir)
+            self.logger.info(f"目录 {self.vocab_dir} 不存在，已创建。")
+        tokens = event.message_str.strip().split()
+        # 如果用户没有指定词库文件名，则提示使用默认词库
+        if len(tokens) < 3 or not tokens[2].strip():
+            yield event.plain_result("没有指定词库喵，已使用默认词库喵~")
+            return
+        param = tokens[2].strip()
+        if param.lower() == "list":
+            try:
+                files = os.listdir(self.vocab_dir)
+                vocab_files = [f for f in files if f.endswith(".json")]
+                if not vocab_files:
+                    yield event.plain_result("没有找到任何词库文件喵～")
                 else:
-                    yield event.plain_result(f"回答错误，正确答案是：{correct}")
-            elif method == "2":
-                # 方式2：根据中文提示，让用户写出英文单词（严格匹配）
-                correct = word  # 英文单词本身
-                chinese = EN_TO_CN.get(word, "未知")
-                answer_prompt = f"请回答：中文【{chinese}】对应的英文单词是？"
-                yield event.plain_result(answer_prompt)
-                user_answer = await self.context.wait_for_message(event.unified_msg_origin, timeout=30)
-                if user_answer.strip() == correct:
-                    yield event.plain_result("回答正确！")
-                else:
-                    yield event.plain_result(f"回答错误，正确答案是：{correct}")
-            elif method == "3":
-                # 方式3：由插件生成提示词，让大语言模型生成包含 **包裹单词** 的句子（此处模拟生成句子）
-                sentence = self.generate_sentence_with_word(word)
-                answer_prompt = f"请根据下面句子判断**包裹的单词的中文意思：\n{sentence}"
-                yield event.plain_result(answer_prompt)
-                user_answer = await self.context.wait_for_message(event.unified_msg_origin, timeout=30)
-                correct = EN_TO_CN.get(word, "未知")
-                if re.fullmatch(correct, user_answer.strip()):
-                    yield event.plain_result("回答正确！")
-                else:
-                    yield event.plain_result(f"回答错误，正确答案是：{correct}")
+                    reply = "可用词库列表：\n" + self.format_list_with_numbers(vocab_files)
+                    yield event.plain_result(reply)
+            except Exception as e:
+                yield event.plain_result(f"获取词库列表失败: {e}")
+            return
+        if not param.endswith(".json"):
+            param += ".json"
+        vocab_path = os.path.join(self.vocab_dir, param)
+        try:
+            with open(vocab_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                words = []
+                mapping = {}
+                for entry in data:
+                    if isinstance(entry, dict) and "word" in entry:
+                        word = entry["word"]
+                        words.append(word)
+                        if "translations" in entry and isinstance(entry["translations"], list) and entry["translations"]:
+                            mapping[word] = entry["translations"][0].get("translation", "未知")
+                self.vocabularies["default"] = words
+                self.EN_TO_CN = mapping
+                self.reset_used_words(words)
+                yield event.plain_result(f"成功切换词库为 '{param}' 喵～")
+                self.logger.info(f"成功切换词库为 {param}")
             else:
-                yield event.plain_result("无效的复习方式。")
-                return
-        # 复习结束，调用大语言模型输出鼓励（这里模拟静态鼓励信息）
-        encouragement = "恭喜你完成复习！你真的很棒，继续努力，本公主永远支持你喵～"
-        yield event.plain_result(encouragement)
+                yield event.plain_result("词库文件格式不正确喵～")
+        except Exception as e:
+            yield event.plain_result(f"切换词库失败: {e}")
+
+    @ewords.command("清空")
+    async def clear_history(self, event: AstrMessageEvent):
+        self.logger.info("接收到清空记忆指令")
+        self.used_words = set()
+        self.word_groups = {}
+        self.save_used_data()
+        yield event.plain_result("已清空所有记忆历史喵～")
+
+    @ewords.command("设置定时", alias={'定时'})
+    async def set_timer(self, event: AstrMessageEvent):
+        self.logger.info("接收到设置定时指令")
+        tokens = event.message_str.strip().split(maxsplit=2)
+        if len(tokens) < 3:
+            self.logger.error("设置定时参数不完整")
+            yield event.plain_result("请提供时间参数，如 '一天', '1小时', 自定义分钟数，或 '取消' 来取消定时提醒。")
+            return
+        param = tokens[2].strip()
+        if param == "取消":
+            if self.timer_task and not self.timer_task.done():
+                self.timer_task.cancel()
+                self.logger.info("定时任务已取消")
+                yield event.plain_result("定时提醒已取消喵～")
+            else:
+                yield event.plain_result("当前没有定时任务喵～")
+            return
+        time_str = param
+        seconds = self.parse_time_interval(time_str)
+        if self.timer_task and not self.timer_task.done():
+            self.timer_task.cancel()
+            self.logger.info("旧定时任务已取消")
+        self.timer_task = asyncio.create_task(
+            self.start_timer(event.unified_msg_origin, seconds)
+        )
+        self.logger.info(f"定时提醒设置为 {time_str}")
+        yield event.plain_result(f"定时提醒已设置为 {time_str}，请注意查收消息喵～")
+
+    @ewords.command("help")
+    async def show_help(self, event: AstrMessageEvent):
+        self.logger.info("接收到帮助指令")
+        help_text = (
+            "【ewords 指令组】可用指令列表：\n"
+            "1. /ewords 记单词数字 —— 记单词（例如：/ewords 记单词15 或 /ewords 记单词 15）\n"
+            "2. /ewords 复习 <方式> <复习类型> —— 复习指令\n"
+            "    方式：1（英文→中文），2（中文→英文）\n"
+            "    复习类型：1 按组复习（使用最新一组记录），2 随机复习\n"
+            "    例如：/ewords 复习 1 1\n"
+            "3. /ewords 验证 <答案1> <答案2> ... —— 验证上次复习答案\n"
+            "4. /ewords 切换 <文件名|list> —— 切换词库或列出词库文件（例如：/ewords 切换 random 或 /ewords 切换 list）\n"
+            "5. /ewords 清空 —— 清空所有记忆历史\n"
+            "6. /ewords 设置定时<参数> —— 设置定时提醒（例如：/ewords 设置定时一天 或 /ewords 设置定时5，传入‘取消’取消）\n"
+            "7. /ewords help —— 显示帮助喵♡～"
+        )
+        yield event.plain_result(help_text)
 
     def generate_sentence_with_word(self, word: str) -> str:
-        # 简单生成包含**包裹单词**的句子，实际可调用 LLM 接口生成更优句子
         return f"I enjoy eating **{word}** when the weather is nice."
 
-    @filter.command("更换词库")
-    async def change_vocabulary(self, event: AstrMessageEvent):
-        """
-        更换词库指令：列出当前可用的词库列表。
-        """
-        if not VOCABULARIES:
-            yield event.plain_result("当前没有词库，请先添加词库。")
-        else:
-            lib_list = "\n".join(f"{idx+1}. {name}" for idx, name in enumerate(VOCABULARIES.keys()))
-            reply = f"当前可用词库：\n{lib_list}"
-            yield event.plain_result(reply)
-
-    @filter.command("设置定时")
-    async def set_timer(self, event: AstrMessageEvent):
-        """
-        设置定时提醒指令：
-        命令格式示例：设置定时一天 / 设置定时1小时 / 设置定时+数字（单位：分钟）
-        """
-        # 提取时间字符串
-        time_str = event.message_str.replace("设置定时", "").strip()
-        if not time_str:
-            yield event.plain_result("请提供时间参数，如 '一天', '1小时', 或自定义分钟数。")
-            return
-        seconds = parse_time_interval(time_str)
-        global timer_interval, timer_task
-        timer_interval = seconds
-        # 启动定时任务（如果未启动）
-        if not timer_task or timer_task.done():
-            timer_task = asyncio.create_task(start_timer(self.context, event.unified_msg_origin))
-        yield event.plain_result(f"定时提醒已设置为 {time_str}。")
-
     async def terminate(self):
-        # 当插件卸载时，取消定时任务
-        global timer_task, timer_interval
-        timer_interval = None
-        if timer_task:
-            timer_task.cancel()
+        if self.timer_task:
+            self.timer_task.cancel()
+            self.logger.info("定时任务已取消")
+
