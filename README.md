@@ -23,6 +23,9 @@ AstrBot_plugin_Ewords 是一个用于 AstrBot 的记单词及复习插件。
 
 2. 确保 `words` 目录下存在默认词库文件 `CET4.json`。如果没有指定词库，插件会自动使用默认词库，并提示“没有指定词库喵，已使用默认词库喵~”。
 
+> [!NOTE]
+> 词库来源为 [https://github.com/KyleBing/english-vocabulary](https://github.com/KyleBing/english-vocabulary)
+
 ## 使用方法
 
 ### 指令说明
