@@ -87,5 +87,3 @@ AstrBot_plugin_Ewords 是一个用于 AstrBot 的记单词及复习插件。
 
 如有问题或建议，请联系 `IGCrystal`。欢迎提交 `PR` ！
 
----
-
