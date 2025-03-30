@@ -205,6 +205,7 @@ class WordPlugin(Star):
         self.logger.info("接收到记单词指令")
         pattern = r"记单词\s*(\d+)"
         match = re.search(pattern, event.message_str)
+        # 如果没有匹配到数字，则默认count为10
         count = int(match.group(1)) if match and match.group(1) else 10
         if count < 10:
             count = 10
@@ -214,9 +215,15 @@ class WordPlugin(Star):
             prompt = "没有指定词库喵，已使用默认词库喵~ 默认为CET4喵~\n"
         words = self.get_unique_words(count)
         self.save_word_group(words)
-        reply = prompt + f"抽取的单词（共{len(words)}个）：\n" + self.format_list_with_numbers(words)
+        # 输出格式为：序号. 单词 - 单词意思
+        result_lines = []
+        for i, word in enumerate(words):
+            translation = self.EN_TO_CN.get(word, "未知")
+            result_lines.append(f"{i+1}. {word} - {translation}")
+        reply = prompt + f"抽取的单词（共{len(words)}个）：\n" + "\n".join(result_lines)
         self.logger.info("记单词指令执行完毕")
         yield event.plain_result(reply)
+
 
     @ewords.command("复习")
     async def review_words(self, event: AstrMessageEvent):
