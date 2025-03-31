@@ -412,7 +412,7 @@ class WordPlugin(Star):
             "3. /ewords 验证 <答案1> <答案2> ... —— 验证上次复习答案\n"
             "4. /ewords 切换 <文件名|list> —— 切换词库或列出词库文件（例如：/ewords 切换 random 或 /ewords 切换 list）\n"
             "5. /ewords 清空 —— 清空所有记忆历史\n"
-            "6. /ewords 设置定时<参数> —— 设置定时提醒（例如：/ewords 设置定时一天 或 /ewords 设置定时5，传入‘取消’取消）\n"
+            "6. /ewords 设置定时 <参数> —— 设置定时提醒（例如：/ewords 设置定时 一天 或 /ewords 设置定时 5，传入‘取消’会取消提醒）\n"
             "7. /ewords help —— 显示帮助喵♡～"
         )
         yield event.plain_result(help_text)
