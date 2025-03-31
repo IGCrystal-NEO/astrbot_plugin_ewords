@@ -24,7 +24,7 @@ DEFAULT_CET4_VOCAB = [
     "absorb", "abstract", "abuse", "academic", "accent", "acceptable", "access", "accident"
 ]
 
-@register("word_plugin", "IGCrystal", "记单词及复习插件", "1.1.1", "https://github.com/IGCrystal/AstrBot_plugin_Ewords")
+@register("word_plugin", "IGCrystal", "记单词及复习插件", "1.1.2", "https://github.com/IGCrystal/AstrBot_plugin_Ewords")
 class WordPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -404,7 +404,7 @@ class WordPlugin(Star):
         self.logger.info("接收到帮助指令")
         help_text = (
             "【ewords 指令组】可用指令列表：\n"
-            "1. /ewords 记单词数字 —— 记单词（例如：/ewords 记单词15 或 /ewords 记单词 15）\n"
+            "1. /ewords 记单词 <数字> —— 记单词（例如：/ewords 记单词 15）\n"
             "2. /ewords 复习 <方式> <复习类型> —— 复习指令\n"
             "    方式：1（英文→中文），2（中文→英文）\n"
             "    复习类型：1 按组复习（使用最新一组记录），2 随机复习\n"
