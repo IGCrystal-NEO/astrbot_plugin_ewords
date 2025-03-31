@@ -1,7 +1,7 @@
 # AstrBot_plugin_Ewords
 
 **记单词及复习插件**  
-版本：1.1.1  
+版本：1.1.2  
 作者：IGCrystal  
 仓库：[https://github.com/IGCrystal/AstrBot_plugin_Ewords](https://github.com/IGCrystal/AstrBot_plugin_Ewords)
 
