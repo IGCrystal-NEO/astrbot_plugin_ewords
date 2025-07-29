@@ -1,4 +1,4 @@
-# AstrBot_plugin_Ewords
+# astrbot_plugin_ewords
 
 **记单词及复习插件**  
 版本：1.1.2  
