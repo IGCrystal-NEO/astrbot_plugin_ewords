@@ -24,7 +24,7 @@ DEFAULT_CET4_VOCAB = [
     "absorb", "abstract", "abuse", "academic", "accent", "acceptable", "access", "accident"
 ]
 
-@register("word_plugin", "IGCrystal", "记单词及复习插件", "1.1.2", "https://github.com/IGCrystal/AstrBot_plugin_Ewords")
+@register("word_plugin", "IGCrystal", "记单词及复习插件", "1.1.2", "https://github.com/IGCrystal-NEO/AstrBot_plugin_Ewords")
 class WordPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
